@@ -1280,7 +1280,32 @@ class ClaudeAgentAdapter:
                     options_kwargs["cli_path"] = self._cli_path
 
                 if system_prompt:
-                    options_kwargs["system_prompt"] = system_prompt
+                    # Windows: long system_prompt as CLI arg exceeds ~8191 char limit.
+                    # Write to temp file and use --system-prompt-file instead.
+                    import tempfile
+                    import platform
+
+                    if platform.system() == "Windows" and len(system_prompt) > 4000:
+                        tmp = tempfile.NamedTemporaryFile(
+                            mode="w",
+                            suffix=".txt",
+                            prefix="ouroboros_sp_",
+                            delete=False,
+                            encoding="utf-8",
+                        )
+                        tmp.write(system_prompt)
+                        tmp.close()
+                        log.info(
+                            "orchestrator.adapter.system_prompt_to_file",
+                            path=tmp.name,
+                            chars=len(system_prompt),
+                        )
+                        options_kwargs["system_prompt"] = {
+                            "type": "file",
+                            "path": tmp.name,
+                        }
+                    else:
+                        options_kwargs["system_prompt"] = system_prompt
 
                 if current_session_id:
                     options_kwargs["resume"] = current_session_id
@@ -1334,6 +1359,15 @@ class ClaudeAgentAdapter:
 
             except Exception as e:
                 last_error = e
+                # Kill orphaned claude subprocesses before retrying (Windows fix)
+                try:
+                    from claude_agent_sdk._internal.transport.subprocess_cli import (
+                        _kill_active_children,
+                    )
+
+                    _kill_active_children()
+                except Exception:
+                    pass
                 if self._is_transient_error(e) and attempt < MAX_RETRIES:
                     wait_time = min(
                         RETRY_WAIT_INITIAL * (2 ** (attempt - 1)),
